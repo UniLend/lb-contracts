@@ -475,12 +475,19 @@ contract AUniLendRouter {
         // send loan amount 
         IERC20(_asset).transferFrom(msg.sender, address(this), totalLiability);
         
-        // send collateral to user
-        IERC20(_collateral).transferFrom(address(this), msg.sender, collateral_amount);
+        // get collateral from user
+        IERC20(collateral).transferFrom(msg.sender, address(this), collateral_amount);
         
-        // repay loan
-        IUniLendV1Pool(asssetPool).repay(_address, address(this), totalLiability);
-        
+        if(asset == WETH){
+            // process borrow
+            IUniLendV1Pool(asssetPool).borrow(msg.sender, address(this), amount);
+            IWETH(WETH).withdraw(amount);
+            (msg.sender).transfer(amount);
+            
+        } else {
+            // process borrow
+            IUniLendV1Pool(asssetPool).borrow(msg.sender, msg.sender, amount);
+        }
     }
     
     mapping(address => mapping(address => uint)) public swapPoolAssets;
