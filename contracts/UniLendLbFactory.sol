@@ -23,16 +23,22 @@ library Math {
     }
 }
 
+
+//----
+
 contract UPool is ERC20 {
+    
     using SafeMath for uint256;
     
     address public factory;
     address public router;
     
+    
     modifier onlyRouter() {
         require(msg.sender == router, 'UnilendV1: UnAutorised Operaton');
         _;
     }
+    
     
     constructor(
         address _router,
@@ -44,28 +50,35 @@ contract UPool is ERC20 {
         router = _router;
         token = _token;
         
-        ltv = 40;
-        lbv = 20;
+        ltv = 70;
+        lbv = 50;
         lb = 10;
         
-        liquidationBonus = 5;
+        // liquidationBonus = 5;
         
         borrowStatus = true;
         lendStatus = true;
         collateralStatus = true;
         
-        _updateInterest(100000); // 10%
+        _updateInterest(200000); // 20%
     }
     
-    address token;
+    
+    address public token;
+    
     
     uint256 public tborrowAmount;
     uint256 public tsupplyAmount;
+    // uint256 public tsupplyAvailable;
+    
     
     uint public blockinterestRate;
-    uint public liquidationBonus;
+    // uint public liquidationBonus;
+    
+    
     
     uint public lastInterestBlock;
+    
     uint public totalinterest;
     uint public totalPaidinterest;
     
@@ -79,9 +92,11 @@ contract UPool is ERC20 {
     bool lendStatus;
     bool collateralStatus;
     
+    
     // mapping(address => supplyMeta) lendingData;
     mapping(address => mapping(uint => borrowMeta)) borrowData;
     mapping(address => uint) public borrowID;
+    
     
     struct borrowMeta {
         uint amount;
@@ -96,6 +111,7 @@ contract UPool is ERC20 {
         address collateral;
     }
     
+    
     uint private unlocked = 1;
     modifier lock() {
         require(unlocked == 1, 'UnilendV1: LOCKED');
@@ -104,21 +120,27 @@ contract UPool is ERC20 {
         unlocked = 1;
     }
     
+    
     function getTotalBorrowedAmount() external view returns (uint) {
         return tborrowAmount;
     }
+    
     
     function getLTV() external view returns (uint) {
         return ltv;
     }
     
+    
+    
     function getLBV() external view returns (uint) {
         return lbv;
     }
     
+    
     function getLB() external view returns (uint) {
         return lb;
     }
+    
     
     function getBorrowStatus() external view returns (bool) {
         return borrowStatus;
@@ -133,6 +155,9 @@ contract UPool is ERC20 {
         return collateralStatus;
     }
     
+    
+    
+    
     function setLTV(uint _value) external onlyRouter {
         ltv = _value;
     }
@@ -146,9 +171,11 @@ contract UPool is ERC20 {
         lb = _value;
     }
     
+    
     function setBorrowStatus(bool _status) external onlyRouter {
         borrowStatus = _status;
     }
+    
     
     function setLendStatus(bool _status) external onlyRouter {
         lendStatus = _status;
@@ -158,26 +185,50 @@ contract UPool is ERC20 {
         collateralStatus = _status;
     }
     
+    
     function _updateInterest(uint newInterest) internal {
         blockinterestRate = (newInterest*10**8).div(4*60*24*365);
     }
+    
     
     function updateInterest(uint newInterest) public onlyRouter {
         _updateInterest(newInterest);
     }
     
+    
+    
     // -------------
+    
+    
+    
+    
+    function _updateTotinterest() internal {
+        uint remainingBlocks = block.number - lastInterestBlock;
+        // totalinterest = totalinterest.add( ( tborrowAmount.mul( remainingBlocks.mul(blockinterestRate) )).div(10**12) );
+        
+        uint newAmount = ( tborrowAmount.mul( remainingBlocks.mul(blockinterestRate) )).div(10**12);
+        
+        tborrowAmount = tborrowAmount.add( newAmount );
+        tsupplyAmount = tsupplyAmount.add( newAmount );
+        
+        lastInterestBlock = block.number;
+    }
+    
     
     function calculateShare(uint _totalShares, uint _totalAmount, uint _amount) public pure returns (uint){
         if(_totalShares == 0){
             return Math.sqrt(_amount.mul( _amount )).sub(1000);
         } else {
-            return (_amount).mul( _totalShares ).div( _totalShares.add( _totalAmount ) );
+            return (_amount).mul( _totalShares ).div( _totalAmount );
         }
     }
     
     function getShareValue(uint _totalAmount, uint _totalSupply, uint _amount) public pure returns (uint){
-        return (_amount.mul(_totalAmount) ).div( _totalSupply );
+        return ( _amount.mul(_totalAmount) ).div( _totalSupply );
+    }
+    
+    function getShareByValue(uint _totalAmount, uint _totalSupply, uint _valueAmount) public pure returns (uint){
+        return ( _valueAmount.mul(_totalSupply) ).div( _totalAmount );
     }
     
     function lend(address _address, address _recipient, uint amount) public onlyRouter {
@@ -185,8 +236,8 @@ contract UPool is ERC20 {
         
         uint _totalSupply = totalSupply();
         
-        uint _totalPoolAmount = tsupplyAmount.add(totalinterest);
-        uint ntokens = calculateShare(_totalSupply, _totalPoolAmount, amount);
+        // uint _totalPoolAmount = tsupplyAmount.add(totalinterest);
+        uint ntokens = calculateShare(_totalSupply, tsupplyAmount, amount);
         
         // transfer ERC20 token for amount
         IERC20(token).transferFrom(_recipient, address(this), amount);
@@ -197,121 +248,94 @@ contract UPool is ERC20 {
         tsupplyAmount = tsupplyAmount.add(amount);
     }
     
-    function _updateTotinterest() internal {
-        uint remainingBlocks = block.number - lastInterestBlock;
-        totalinterest = totalinterest.add( ( tborrowAmount.mul( remainingBlocks.mul(blockinterestRate) )).div(10**12) );
-        
-        lastInterestBlock = block.number;
-    }
+    
+    uint public totalBorrowShare;
+    mapping(address => uint) public borrowShare;
+    
     
     function borrow(address _address, address _recipient, uint amount) public onlyRouter {
         _updateTotinterest();
         
-        require(amount <= IERC20(token).balanceOf(address(this)));
+        require(amount <= IERC20(token).balanceOf(address(this)), "Liquidity not available");
         require(amount > 0, "Borrow Amount Should be Greater than 0");
         
-        borrowMeta storage bm = borrowData[_address][borrowID[_address]];
         
-        require(!bm.status, "Loan Already Active");
         
-        bm.currentInterest = totalinterest;
-        bm.amount = amount;
-        bm.block = block.number;
-        bm.status = true;
+        uint nShares = calculateShare(tborrowAmount, totalBorrowShare, amount);
+        borrowShare[_address] = borrowShare[_address].add(nShares);
+        
+        totalBorrowShare = totalBorrowShare.add(nShares);
+        
         
         // transfer ERC20 token for amount
         IERC20(token).transfer(_recipient, amount);
         
+        
         tborrowAmount = tborrowAmount.add(amount);
+        // tsupplyAvailable = tsupplyAvailable.sub(amount);
     }
     
+    
     function repay(address _address, address _recipient, uint amount) public onlyRouter returns(uint, bool, bool) {
-        borrowMeta storage bm = borrowData[_address][borrowID[_address]];
+        _updateTotinterest();
         
-        if(bm.amount > 0){
-            _updateTotinterest();
+        uint borrowAmount = getShareValue(tborrowAmount, totalBorrowShare, borrowShare[_address]);
+        
+        if(amount > borrowAmount){
+            amount = borrowAmount;
+        }
+        
+        if(amount > 0){
             
-            uint _addressInterest = borrowInterestOf(_address);
-            uint remainingInterest = _addressInterest.sub( bm.paidInterest );
-            uint totWInterest = (bm.amount).add( remainingInterest );
-            uint remaining = totWInterest.sub( bm.paid );
+            uint paidShare = getShareByValue(tborrowAmount, totalBorrowShare, amount);
             
-            if(amount > remaining){
-                amount = remaining;
-            }
+            totalBorrowShare = totalBorrowShare.sub(paidShare);
+            borrowShare[_address] = borrowShare[_address].sub(paidShare);
             
-            if(remainingInterest > amount){
-                totalPaidinterest = totalPaidinterest.add( amount );
-                bm.paidInterest = (bm.paidInterest).add( amount );
-                
-                tsupplyAmount = tsupplyAmount.add( amount );
-            } else {
-                uint _paidAmount = amount.sub(remainingInterest);
-                totalPaidinterest = totalPaidinterest.add( remainingInterest );
-                
-                if(_paidAmount > 0){
-                    tborrowAmount = tborrowAmount.sub( _paidAmount );
-                    tsupplyAmount = tsupplyAmount.add( remainingInterest );
-                    
-                } else {
-                    tborrowAmount = tborrowAmount.sub( _paidAmount );
-                    tsupplyAmount = tsupplyAmount.add( amount );
-                }
-                
-                bm.paidInterest = (bm.paidInterest).add(remainingInterest);
-                bm.paid = (bm.paid).add(_paidAmount);
-            }
-            
+            tborrowAmount = tborrowAmount.sub(amount);
             
             // transfer ERC20 token for amount
             IERC20(token).transferFrom(_recipient, address(this), amount);
             
-            
-            if(amount == remaining){
-                bm.status = false;
-                borrowID[_address] ++;
+            if(amount == borrowAmount){
+                // bm.status = false;
+                // borrowID[_address] ++;
+                borrowShare[_address] = 0;
                 
                 return (amount, true, true);
             } else {
                 return (amount, true, false);
             }
-        } 
-        
-    }
-    
-    
-    function borrowBalanceOf(address _address) public view returns (uint) {
-        borrowMeta storage bm = borrowData[_address][borrowID[_address]];
-        
-        if(bm.amount > 0){
-            uint _addressInterest = borrowInterestOf(_address);
-            uint remainingInterest = _addressInterest.sub( bm.paidInterest );
-            uint totWInterest = (bm.amount).add( remainingInterest );
             
-            return totWInterest.sub( bm.paid );
         } 
         else {
-            return 0;
+            return (0, true, false);
         }
     }
     
     
-    function borrowInterestOf(address _address) public view returns (uint) {
-        borrowMeta storage bm = borrowData[_address][borrowID[_address]];
+    function borrowBalanceOf(address _address) public view returns (uint) {
+        // borrowMeta storage bm = borrowData[_address][borrowID[_address]];
         
-        if(bm.amount > 0){
+        uint _balance = borrowShare[_address];
         
-            uint remainingBlocks = block.number - lastInterestBlock;
+        if(_balance > 0){
             
-            uint tmptotalinterest = totalinterest.add( ( tborrowAmount.mul( remainingBlocks.mul(blockinterestRate) )).div(10**12) );
+            uint _tsupplyAmount = tsupplyAmount;
+            uint _tborrowAmount = tborrowAmount;
             
-            tmptotalinterest = tmptotalinterest.sub(bm.currentInterest);
+            if(lastInterestBlock < block.number){
+                uint remainingBlocks = block.number - lastInterestBlock;
+                
+                uint newAmount = ( tborrowAmount.mul( remainingBlocks.mul(blockinterestRate) )).div(10**12);
+                
+                _tborrowAmount = tborrowAmount.add( newAmount );
+                _tsupplyAmount = _tsupplyAmount.add( newAmount );
+            }
             
-            uint cShare = ( (bm.amount).mul(100) ).div(tborrowAmount);
             
-            uint totInterest = ( tmptotalinterest.mul( cShare ) ).div(100);
-            
-            return totInterest;
+            uint _totalPoolAmount = _tborrowAmount;
+            return getShareValue(_totalPoolAmount, totalBorrowShare, _balance);
         } 
         else {
             return 0;
@@ -328,8 +352,10 @@ contract UPool is ERC20 {
         
         require(IERC20(token).balanceOf(address(this)) >= poolAmount, "Not enough Liquidity");
         
+        
         // tsupplyAvailable = tsupplyAvailable.sub(poolAmount);
         tsupplyAmount = tsupplyAmount.sub(poolAmount);
+        
         
         // BURN uTokens
         _burn(_address, tok_amount);
@@ -344,15 +370,16 @@ contract UPool is ERC20 {
     function lendingBalanceOf(address _address) public view returns (uint) {
         uint _balance = balanceOf(_address);
         
-        if(balanceOf(_address) > 0){
-            uint _totalinterest = totalinterest;
+        if(_balance > 0){
+            uint _tsupplyAmount = tsupplyAmount;
             
             if(lastInterestBlock < block.number){
                 uint remainingBlocks = block.number - lastInterestBlock;
-                _totalinterest = totalinterest.add( ( tborrowAmount.mul( remainingBlocks.mul(blockinterestRate) )).div(10**12) );
+                _tsupplyAmount = _tsupplyAmount.add( ( tborrowAmount.mul( remainingBlocks.mul(blockinterestRate) )).div(10**12) );
             }
             
-            uint _totalPoolAmount = tsupplyAmount.add(_totalinterest);
+            
+            uint _totalPoolAmount = _tsupplyAmount;
             return getShareValue(_totalPoolAmount, totalSupply(), _balance);
         } 
         else {
@@ -371,7 +398,6 @@ contract AUniLendFactory is Context {
         _;
         unlocked = 1;
     }
-    
     
     event PoolCreated(address indexed token, address pool, uint);
     

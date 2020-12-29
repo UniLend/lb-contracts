@@ -27,11 +27,6 @@ library Math {
 
 //----
 
-
-
-
-
-
 interface IWETH {
     function deposit() external payable;
     function transfer(address to, uint value) external returns (bool);
@@ -265,6 +260,9 @@ interface IUnilendV1Router01 {
 }
 
 
+
+
+
 contract AUniLendRouter {
     using SafeMath for uint256;
     
@@ -276,7 +274,6 @@ contract AUniLendRouter {
     IUnilendV1Router01 swapRouter;
     
     
-    // 0xA403Edfd69126638e146C05308BA860135c52dF1, 0x1AB74d9eBD4FEC1A88a386e2597C2068eb28c9b1, 0xc778417E063141139Fce010982780140Aa0cD5Ab
     constructor(
         address _factory,
         address _swapRouter,
@@ -290,6 +287,7 @@ contract AUniLendRouter {
         
         factoryV1.setRouter(address(this));
     }
+    
     
     receive() external payable {
         assert(msg.sender == WETH); // only accept ETH via fallback from the WETH contract
@@ -322,6 +320,7 @@ contract AUniLendRouter {
         
         IUniLendV1Pool(_pool).setLB(_value);
     }
+    
     
     function setBorrowStatus(address _pool, bool _status) external {
         require(factoryV1.getAdmin() == msg.sender, 'UnilendV1: FORBIDDEN');
@@ -395,86 +394,100 @@ contract AUniLendRouter {
         return swapRouter.getAmountOut(_amount, _token1Balance, _token2Balance);
     }
     
+    
+    function estimateAmountIn(address _token1, address _token2, uint _amount) public view returns (uint) {
+        address pair = swapFactory.getPair(_token1, _token2);
+        uint _token1Balance = IERC20(_token1).balanceOf(pair);
+        uint _token2Balance = IERC20(_token2).balanceOf(pair);
+        
+        return swapRouter.getAmountIn(_amount, _token1Balance, _token2Balance);
+    }
+    
+    
     //------
     
     function calculateShare(uint _totalShares, uint _totalAmount, uint _amount) public pure returns (uint){
         if(_totalShares == 0){
             return Math.sqrt(_amount.mul( _amount )).sub(1000);
         } else {
-            return (_amount).mul( _totalShares ).div( _totalShares.add( _totalAmount ) );
+            return (_amount).mul( _totalShares ).div( _totalAmount );
         }
     }
     
-    function liquidate(uint loanId) external {
-        LoanMeta storage lm = loans[loanId];
+    function getShareValue(uint _totalAmount, uint _totalSupply, uint _amount) public pure returns (uint){
+        return ( _amount.mul(_totalAmount) ).div( _totalSupply );
+    }
+    
+    function getShareByValue(uint _totalAmount, uint _totalSupply, uint _valueAmount) public pure returns (uint){
+        return ( _valueAmount.mul(_totalSupply) ).div( _totalAmount );
+    }
+    
+    
+    
+    function _burnShares(address _token, address _address, uint _amount) internal {
+        userCollateralShare[_address][_token] = userCollateralShare[_address][_token].sub(_amount);
+        totalcollateralShare[_token] = totalcollateralShare[_token].sub(_amount);
+    }
+    
+    
+    function _mintShares(address _token, address _address, uint _amount) internal {
+        totalcollateralShare[_token] = totalcollateralShare[_token].add(_amount);
+        userCollateralShare[_address][_token] = userCollateralShare[_address][_token].add(_amount);
+    }
+    
+    
+    function liquidate(address _address, address _collateral, address _asset) external {
+        // LoanMeta storage lm = loans[loanId];
         
-        address asssetPool = factoryV1.getPool(lm.assetAddress);
-        address collateralPool = factoryV1.getPool(lm.collateralAddress);
+        address asssetPool = factoryV1.getPool(_asset);
+        address collateralPool = factoryV1.getPool(_collateral);
         
         require(asssetPool != address(0), 'UnilendV1: Pool Not Found');
         require(collateralPool != address(0), 'UnilendV1: Collateral Pool Not Found');
         
+        
         IUniLendV1Pool _asssetPool = IUniLendV1Pool(asssetPool);
         // IUniLendV1Pool _collateralPool = IUniLendV1Pool(collateralPool);
         
-        address pair = swapFactory.getPair(lm.collateralAddress, lm.assetAddress);
+        
+        address pair = swapFactory.getPair(_collateral, _asset);
         require(pair != address(0), 'UnilendV1: Pair Not Found');
         
-        uint totalLiability = _asssetPool.borrowBalanceOf(lm.user);
+        uint totalLiability = _asssetPool.borrowBalanceOf(_address);
+        
+        uint _balance = userCollateralShare[_address][_collateral];
+        
         
         // calculate collateral amount
-        uint collateral_amount = ((lm.collateral_share).mul( totalcollateral[lm.collateralAddress] ) ).div( totalcollateralShare[lm.collateralAddress] );
-        uint recoveredAsset = estimateAmount(lm.collateralAddress, lm.assetAddress, collateral_amount);
+        uint _totalTokens = IERC20(_collateral).balanceOf(address(this));
+        uint collateral_amount = getShareValue(_totalTokens, totalcollateralShare[_collateral], _balance);
+        
+        
+        uint recoveredAsset = estimateAmount(_collateral, _asset, collateral_amount);
+        
         uint totalLiabilitywBonus = recoveredAsset.add( recoveredAsset.mul(_asssetPool.getLB()).div(100) );
         
         require(recoveredAsset < totalLiabilitywBonus, 'UnilendV1: Liquidation not reached yet');
         
         // liquidate collateral
-        
-        totalcollateral[lm.collateralAddress] = totalcollateral[lm.collateralAddress].sub(collateral_amount);
-        totalcollateralShare[lm.collateralAddress] = totalcollateralShare[lm.collateralAddress].sub(lm.collateral_share);
+        _burnShares(_collateral, _address, _balance);
         
         // send loan amount 
-        IERC20(lm.assetAddress).transferFrom(msg.sender, address(this), totalLiability);
+        IERC20(_asset).transferFrom(msg.sender, address(this), totalLiability);
         
         // send collateral to user
-        IERC20(lm.collateralAddress).transferFrom(address(this), msg.sender, collateral_amount);
+        IERC20(_collateral).transferFrom(address(this), msg.sender, collateral_amount);
         
         // repay loan
-        IUniLendV1Pool(asssetPool).repay(lm.user, address(this), totalLiability);
+        IUniLendV1Pool(asssetPool).repay(_address, address(this), totalLiability);
+        
     }
     
-    
-    mapping(address => mapping(address => uint)) public userLoans;
-    mapping(uint => LoanMeta) loans;
-    uint loansIndex;
-    
-    struct LoanMeta {
-        address assetAddress;
-        address collateralAddress;
-        address user;
-        uint collateral_amount;
-        uint collateral_share;
-        uint amount;
-        uint time;
-    }
-    
-    
-    mapping(address => uint) public totalcollateral; 
-    mapping(address => uint) public totalcollateralShare; 
     mapping(address => mapping(address => uint)) public swapPoolAssets;
+    mapping(address => uint) public totalcollateralShare; 
+    mapping(address => mapping(address => uint)) public userCollateralShare;
     
     
-    
-    function updateShare(address collateral, uint collateral_amount) internal returns (uint){
-        totalcollateral[collateral] = totalcollateral[collateral].add(collateral_amount);
-        
-        uint userShare = calculateShare(totalcollateralShare[collateral], totalcollateral[collateral], collateral_amount);
-        
-        totalcollateralShare[collateral] = totalcollateralShare[collateral].add(userShare);
-        
-        return userShare;
-    }
     
     function borrow(address collateral, address asset, uint collateral_amount, uint amount) public {
         address asssetPool = factoryV1.getPool(asset);
@@ -483,47 +496,52 @@ contract AUniLendRouter {
         require(asssetPool != address(0), 'UnilendV1: Pool Not Found');
         require(collateralPool != address(0), 'UnilendV1: Collateral Pool Not Found');
         
+        
         IUniLendV1Pool _asssetPool = IUniLendV1Pool(asssetPool);
         IUniLendV1Pool _collateralPool = IUniLendV1Pool(asssetPool);
         
+        
+        {
         require(_asssetPool.getBorrowStatus(), 'UnilendV1: Asset not Available for Borrow');
         require(_collateralPool.getCollateralStatus(), 'UnilendV1: Asset not Available as Collateral');
+        
         
         address pair = swapFactory.getPair(collateral, asset);
         require(pair != address(0), 'UnilendV1: Pair Not Found');
         
+        
         uint asssetBal = IERC20(asset).balanceOf(pair);
+        
         
         uint maxLBorrow = asssetBal.mul(_asssetPool.getLBV()).div(100);
         require(maxLBorrow >= amount.add(_asssetPool.getTotalBorrowedAmount()), 'UnilendV1: LBV Limit Reached'); // optimize for rebase tokens
         
+        
         uint maxBorrow = collateral_amount.mul(_collateralPool.getLTV()).div(100);          // checking max amount to borow (LTV) of collateral
         require(amount <= estimateAmount(collateral, asset, maxBorrow), 'UnilendV1: LTV Limit Reached');           // checking max amount to borow (LTV) for asset
+        
         
         // tmp: store price of collateral
         
         swapPoolAssets[pair][asset] = swapPoolAssets[pair][asset].add(amount);
+        }
         
-        uint userShare = updateShare(collateral, collateral_amount);
         
-        // create Loan ID
-        LoanMeta storage lm = loans[loansIndex];
+        uint _totalTokens = IERC20(collateral).balanceOf(address(this));
+        uint nShares = calculateShare(_totalTokens, totalcollateralShare[collateral], collateral_amount);
         
-        lm.assetAddress = asset;
-        lm.collateralAddress = collateral;
-        lm.collateral_share = userShare;
-        lm.user = msg.sender;
-        lm.time = block.timestamp;
         
-        userLoans[msg.sender][pair] = loansIndex;
+        _mintShares(collateral, msg.sender, nShares);
         
-        loansIndex++;
         
         // get collateral from user
         IERC20(collateral).transferFrom(msg.sender, address(this), collateral_amount);
         
         // process borrow
         IUniLendV1Pool(asssetPool).borrow(msg.sender, msg.sender, amount);
+        
+        
+        
     }
     
     function repay(address collateral, address asset, uint amount) external {
@@ -534,17 +552,12 @@ contract AUniLendRouter {
         (_amount, , _loanEnd) = IUniLendV1Pool(asssetPool).repay(msg.sender, msg.sender, amount);
         
         if(_loanEnd){
-            address pair = swapFactory.getPair(collateral, asset);
+            uint _balance = userCollateralShare[msg.sender][collateral];
             
-            LoanMeta storage lm = loans[userLoans[msg.sender][pair]];
+            uint _totalTokens = IERC20(collateral).balanceOf(address(this));
+            uint _collateralAmount = getShareValue(_totalTokens, totalcollateralShare[collateral], _balance);
             
-            uint _collateralAmount = ( totalcollateral[collateral]).mul( lm.collateral_share ).div( totalcollateralShare[collateral] );
-            
-            totalcollateral[collateral] = totalcollateral[collateral].sub(_collateralAmount);
-            totalcollateralShare[collateral] = totalcollateralShare[collateral].sub(lm.collateral_share);
-            
-            userLoans[msg.sender][pair] = 0;
-            
+            _burnShares(collateral, msg.sender, _balance);
             
             
             if(_collateralAmount > 0){
@@ -564,27 +577,25 @@ contract AUniLendRouter {
         (_amount, , _loanEnd) = IUniLendV1Pool(asssetPool).repay(msg.sender, address(this), amount);
          
         if(_loanEnd){
-            address pair = swapFactory.getPair(collateral, WETH);
+            uint _balance = userCollateralShare[msg.sender][collateral];
             
-            LoanMeta storage lm = loans[userLoans[msg.sender][pair]];
+            uint _totalTokens = IERC20(collateral).balanceOf(address(this));
+            uint _collateralAmount = getShareValue(_totalTokens, totalcollateralShare[collateral], _balance);
             
-            uint _collateralAmount = ( totalcollateral[collateral] ).mul( lm.collateral_share ).div( totalcollateralShare[collateral] );
             
-            totalcollateral[collateral] = totalcollateral[collateral].sub(_collateralAmount);
-            totalcollateralShare[collateral] = totalcollateralShare[collateral].sub(lm.collateral_share);
+            _burnShares(collateral, msg.sender, _balance);
             
-            userLoans[msg.sender][pair] = 0;
             
             if(_collateralAmount > 0){
                 IERC20(collateral).transfer(msg.sender, _collateralAmount);
             }
-            
-            if(amount > _amount){
-                uint _remAmount = amount.sub(_amount);
-                IWETH(WETH).withdraw(_remAmount);
-                (msg.sender).transfer(_remAmount);
-            }
-         }
+         } 
+         
+         if(amount > _amount){
+            uint _remAmount = amount.sub(_amount);
+            IWETH(WETH).withdraw(_remAmount);
+            (msg.sender).transfer(_remAmount);
+        }
     }
     
     function redeem(address asset, uint amount) external {
@@ -607,27 +618,19 @@ contract AUniLendRouter {
         (msg.sender).transfer(wAmount);
     }
     
-    function getCollateralShare(address collateral, address asset, address _address) external view returns(uint) {
-        address pair = swapFactory.getPair(collateral, asset);
-        
-        LoanMeta storage lm = loans[userLoans[_address][pair]];
-        
-        return lm.collateral_share;
+    function getCollateralShare(address collateral, address _address) external view returns(uint) {
+        return userCollateralShare[_address][collateral];
     }
     
-    function getCollateralAmount(address collateral, address asset, address _address) external view returns(uint) {
-        address pair = swapFactory.getPair(collateral, asset);
-        
+    function getCollateralAmount(address collateral, address _address) external view returns(uint) {
         uint _amount = 0;
+        uint _balance = userCollateralShare[_address][collateral];
         
-        if(pair != address(0)){
-            LoanMeta storage lm = loans[userLoans[_address][pair]];
+        if(_balance > 0){
+            uint _totalTokens = IERC20(collateral).balanceOf(address(this));
             
-            if(lm.collateral_share > 0 && totalcollateralShare[collateral] > 0){
-                _amount = ( totalcollateral[collateral]).mul( lm.collateral_share ).div( totalcollateralShare[collateral] );
-            }
+            _amount = getShareValue(_totalTokens, totalcollateralShare[collateral], _balance);
         }
-        
         
         return _amount;
     }
@@ -639,8 +642,24 @@ contract AUniLendRouter {
         IUniLendV1Pool _collateralPool = IUniLendV1Pool(asssetPool);
         
         if(_asssetPool.getBorrowStatus() && _collateralPool.getCollateralStatus()){
+            
             uint maxBorrow = collateral_amount.mul(_collateralPool.getLTV()).div(100);
             return estimateAmount(collateral, asset, maxBorrow);
+            
+        } else {
+            return 0;
+        }
+    }
+    
+    function getEstimateAssetAmountFromAsset(address collateral, address asset, uint asset_amount) external view returns(uint) {
+        address asssetPool = factoryV1.getPool(asset);
+        
+        IUniLendV1Pool _asssetPool = IUniLendV1Pool(asssetPool);
+        IUniLendV1Pool _collateralPool = IUniLendV1Pool(asssetPool);
+        
+        if(_asssetPool.getBorrowStatus() && _collateralPool.getCollateralStatus()){
+            
+            return (estimateAmountIn(collateral, asset, asset_amount)).mul(100).div(_collateralPool.getLTV());
         } else {
             return 0;
         }
